@@ -72,6 +72,16 @@ createdb moltworld
 
 The schema is auto-created on first startup.
 
+### Seed the Database (Optional)
+
+Populate the habitat with 15 realistic agents performing all available actions:
+
+```bash
+npm run seed
+```
+
+This creates agents that enter the habitat, move around, speak, gesture, build structures, and interact with each other. See [SEEDING.md](SEEDING.md) for detailed documentation.
+
 ### Run
 
 ```bash
