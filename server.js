@@ -48,7 +48,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "blob:"],
-      connectSrc: ["'self'", "ws:", "wss:", "https://api.elevenlabs.io", "https://horizon.meta.com"],
+      connectSrc: ["'self'", "ws:", "wss:", "https://horizon.meta.com"],
       mediaSrc: ["'self'", "data:", "blob:"],
       workerSrc: ["'self'", "blob:"],
     },
@@ -644,14 +644,26 @@ io.on('connection', (socket) => {
   socket.on('request:state', async () => {
     try {
       const positions = await db.getAllActivePositions();
+      const structures = await db.getAllStructures();
       socket.emit('habitat:state', {
         agents: positions.map(p => ({
           agent_id: p.id,
           name: p.name,
+          description: p.description,
           position: { x: p.x, y: p.y, z: p.z },
           velocity: { x: p.velocity_x, y: p.velocity_y, z: p.velocity_z },
           orientation: { yaw: p.yaw, pitch: p.pitch, roll: p.roll },
           animation: p.animation,
+          avatar_color: p.avatar_color,
+        })),
+        structures: structures.map(s => ({
+          id: s.id,
+          name: s.name,
+          type: s.type,
+          material: s.material,
+          position: { x: s.position_x, y: s.position_y, z: s.position_z },
+          size: { width: s.size_width, length: s.size_length, height: s.size_height },
+          builder: s.builder_name,
         })),
         timestamp: Date.now(),
       });

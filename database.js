@@ -430,6 +430,17 @@ async function shutdown() {
   logger.info('Database connections closed');
 }
 
+async function getAllStructures() {
+  const result = await pool.query(
+    `SELECT s.*, a.name as builder_name
+     FROM structures s
+     LEFT JOIN agents a ON s.agent_id = a.id
+     ORDER BY s.created_at DESC
+     LIMIT 500`
+  );
+  return result.rows;
+}
+
 module.exports = {
   pool,
   connectRedis,
@@ -449,6 +460,7 @@ module.exports = {
   updateStructure,
   deleteStructure,
   getStructureById,
+  getAllStructures,
   logInteraction,
   getChronicle,
   getHabitatStats,
