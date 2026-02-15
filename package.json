@@ -4,7 +4,9 @@
   "description": "Meta Horizon VR metaverse for autonomous OpenClaw agents",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "seed": "node seed.js",
+    "seed:clean": "node seed.js --clean"
   },
   "dependencies": {
     "express": "^4.19.0",
