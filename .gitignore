@@ -17,6 +17,7 @@ yarn-error.log*
 # Runtime data
 pids
 *.pid
+# Exclude V8/Node.js random seed files from testing/debugging
 *.seed
 *.pid.lock
 
