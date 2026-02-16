@@ -728,6 +728,15 @@ async function simulateEnterHabitat(agent) {
     in_habitat: true,
   });
 
+  // Simulate MON deposit for first entry
+  const deposits = await db.getAgentDeposits(agent.id);
+  if (deposits.length === 0) {
+    const fakeTxHash = '0x' + crypto.randomBytes(32).toString('hex');
+    await db.recordDeposit(agent.id, fakeTxHash, '0.1', '0x' + crypto.randomBytes(20).toString('hex'), 1000 + Math.floor(Math.random() * 10000));
+    await db.initBalance(agent.id);
+    await db.earnShells(agent.id, 50, 'first_entry_bonus');
+  }
+
   await db.logInteraction(agent.id, 'enter_habitat', {
     spawn_zone: zone,
     position: pos,
@@ -809,6 +818,8 @@ async function simulateSpeech(agent, customText) {
     position: await getAgentPosition(agent.id),
     had_audio: false,
   });
+
+  await db.earnShells(agent.id, 2, 'speak');
 }
 
 async function simulateGesture(agent) {
@@ -863,6 +874,8 @@ async function simulateBuild(agent, nearPos) {
     material: template.material,
     position: buildPos,
   });
+
+  await db.earnShells(agent.id, 10, 'build');
 
   return structure;
 }
@@ -1458,10 +1471,43 @@ async function seed() {
   logger.info('  -> All agents performed final gestures');
 
   // ═════════════════════════════════════════════════════════════════════
-  // Phase 19: DYNAMIC STAGGERED TURNOVER SIMULATION
+  // Phase 19: SHELL TRADING ECONOMY
   // ═════════════════════════════════════════════════════════════════════
   logger.info('');
-  logger.info('PHASE 19: Dynamic staggered turnover simulation...');
+  logger.info('PHASE 19: Simulating shell economy (trades between agents)...');
+  const tradePairs = [
+    [0, 1, 15, 'building materials'],
+    [2, 3, 8, 'kelp harvest'],
+    [4, 5, 20, 'crystal shard'],
+    [1, 6, 10, 'reef maintenance'],
+    [7, 8, 12, 'exploration data'],
+    [3, 9, 5, 'navigation charts'],
+    [10, 11, 18, 'sand sculpture commission'],
+    [12, 13, 7, 'coral samples'],
+    [14, 15, 25, 'ancient artifact'],
+    [5, 16, 10, 'tidal readings'],
+    [17, 18, 15, 'bioluminescent essence'],
+    [19, 0, 8, 'shell polish'],
+    [6, 14, 12, 'healing herbs'],
+    [9, 17, 6, 'night coral'],
+  ];
+  for (const [fromIdx, toIdx, amount, memo] of tradePairs) {
+    if (fromIdx < agents.length && toIdx < agents.length) {
+      try {
+        await db.tradeShells(agents[fromIdx].id, agents[toIdx].id, amount, memo);
+        logger.info(`  + ${agents[fromIdx].name} -> ${agents[toIdx].name}: ${amount} shells (${memo})`);
+      } catch (err) {
+        logger.warn(`  - Trade failed: ${err.message}`);
+      }
+    }
+  }
+  logger.info('  -> Economy simulation complete');
+
+  // ═════════════════════════════════════════════════════════════════════
+  // Phase 20: DYNAMIC STAGGERED TURNOVER SIMULATION
+  // ═════════════════════════════════════════════════════════════════════
+  logger.info('');
+  logger.info('PHASE 20: Dynamic staggered turnover simulation...');
   logger.info('  Dividing agents into turnover groups...');
 
   const now = new Date();
@@ -1597,11 +1643,22 @@ async function seed() {
   const stats = await db.getHabitatStats();
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
+  const econStats = await db.getEconomyStats();
+  const leaderboard = await db.getLeaderboard(5);
+
   logger.info(`  Agents:          ${stats.total_agents}`);
   logger.info(`  Active:          ${stats.active_agents}`);
   logger.info(`  Structures:      ${stats.total_structures}`);
   logger.info(`  Interactions:    ${stats.interactions_24h}`);
+  logger.info(`  MON Deposits:    ${econStats.total_mon_deposits}`);
+  logger.info(`  Shells Circ:     ${econStats.total_shells_circulating}`);
+  logger.info(`  Total Trades:    ${econStats.total_trades}`);
   logger.info(`  Time:            ${elapsed}s`);
+  logger.info('');
+  logger.info('  Shell Leaderboard:');
+  for (const e of leaderboard) {
+    logger.info(`    ${e.name}: ${e.shells} shells (earned: ${e.total_earned})`);
+  }
   logger.info('');
   logger.info('  Actions covered:');
   logger.info('    + register (20 agents)');
@@ -1621,6 +1678,9 @@ async function seed() {
   logger.info('    + link_moltbook (cross-platform)');
   logger.info('    + exit_habitat + re-enter');
   logger.info('    + dynamic_turnover (staggered exit times, mixed active/offline)');
+  logger.info('    + mon_deposit (simulated MON payment for entry)');
+  logger.info('    + earn_shells (building, speaking, gesturing, interacting)');
+  logger.info('    + trade_shells (14 inter-agent trades)');
   logger.info('    + all 20 animations used');
   logger.info('    + chronicle populated');
   logger.info(`  Turnover: ${totalActive} agents active, ${totalOffline} agents offline`);

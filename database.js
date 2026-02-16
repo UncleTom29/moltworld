@@ -97,11 +97,43 @@ CREATE TABLE IF NOT EXISTS interactions (
   timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS deposits (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+  tx_hash VARCHAR(66) UNIQUE NOT NULL,
+  amount VARCHAR(78) NOT NULL,
+  from_address VARCHAR(42),
+  block_number BIGINT DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS balances (
+  agent_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+  shells BIGINT DEFAULT 0,
+  total_earned BIGINT DEFAULT 0,
+  total_spent BIGINT DEFAULT 0,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  from_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+  to_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+  amount BIGINT NOT NULL CHECK (amount > 0),
+  memo VARCHAR(200) DEFAULT '',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_interactions_timestamp ON interactions(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_interactions_agent ON interactions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_structures_position ON structures(position_x, position_y, position_z);
 CREATE INDEX IF NOT EXISTS idx_agents_claim_token ON agents(claim_token);
 CREATE INDEX IF NOT EXISTS idx_agents_api_key_hash ON agents(api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_deposits_tx_hash ON deposits(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_deposits_agent ON deposits(agent_id);
+CREATE INDEX IF NOT EXISTS idx_balances_shells ON balances(shells DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_from ON trades(from_agent_id);
+CREATE INDEX IF NOT EXISTS idx_trades_to ON trades(to_agent_id);
 `;
 
 async function initializeDatabase() {
@@ -368,7 +400,8 @@ async function linkMoltbook(agentId, moltbookApiKeyHash) {
 
 async function getAllActivePositions() {
   const result = await pool.query(
-    `SELECT a.id, a.name, p.x, p.y, p.z, p.velocity_x, p.velocity_y, p.velocity_z,
+    `SELECT a.id, a.name, a.description, a.avatar_color,
+            p.x, p.y, p.z, p.velocity_x, p.velocity_y, p.velocity_z,
             p.yaw, p.pitch, p.roll, p.animation, p.last_update
      FROM agents a
      JOIN positions p ON a.id = p.agent_id
@@ -430,6 +463,132 @@ async function shutdown() {
   logger.info('Database connections closed');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ECONOMY: DEPOSITS, BALANCES, TRADES
+// ═══════════════════════════════════════════════════════════════
+
+async function isTxHashUsed(txHash) {
+  const result = await pool.query(
+    `SELECT id FROM deposits WHERE tx_hash = $1`, [txHash]
+  );
+  return result.rows.length > 0;
+}
+
+async function recordDeposit(agentId, txHash, amount, fromAddress, blockNumber) {
+  const result = await pool.query(
+    `INSERT INTO deposits (agent_id, tx_hash, amount, from_address, block_number)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [agentId, txHash, amount, fromAddress || null, blockNumber || 0]
+  );
+  return result.rows[0];
+}
+
+async function initBalance(agentId) {
+  await pool.query(
+    `INSERT INTO balances (agent_id, shells) VALUES ($1, 0) ON CONFLICT (agent_id) DO NOTHING`,
+    [agentId]
+  );
+}
+
+async function getBalance(agentId) {
+  const result = await pool.query(
+    `SELECT * FROM balances WHERE agent_id = $1`, [agentId]
+  );
+  if (result.rows.length === 0) {
+    await initBalance(agentId);
+    return { agent_id: agentId, shells: 0, total_earned: 0, total_spent: 0 };
+  }
+  return result.rows[0];
+}
+
+async function earnShells(agentId, amount, reason) {
+  await initBalance(agentId);
+  const result = await pool.query(
+    `UPDATE balances
+     SET shells = shells + $2, total_earned = total_earned + $2, updated_at = NOW()
+     WHERE agent_id = $1
+     RETURNING shells, total_earned`,
+    [agentId, amount]
+  );
+  await logInteraction(agentId, 'earn_shells', { amount, reason, new_balance: result.rows[0]?.shells });
+  return result.rows[0];
+}
+
+async function tradeShells(fromAgentId, toAgentId, amount, memo) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const fromBal = await client.query(
+      `SELECT shells FROM balances WHERE agent_id = $1 FOR UPDATE`, [fromAgentId]
+    );
+    if (!fromBal.rows[0] || fromBal.rows[0].shells < amount) {
+      await client.query('ROLLBACK');
+      throw new Error(`Insufficient shells. Have: ${fromBal.rows[0]?.shells || 0}, need: ${amount}`);
+    }
+
+    await client.query(
+      `UPDATE balances SET shells = shells - $2, total_spent = total_spent + $2, updated_at = NOW()
+       WHERE agent_id = $1`,
+      [fromAgentId, amount]
+    );
+
+    await initBalance(toAgentId);
+    await client.query(
+      `UPDATE balances SET shells = shells + $2, total_earned = total_earned + $2, updated_at = NOW()
+       WHERE agent_id = $1`,
+      [toAgentId, amount]
+    );
+
+    const trade = await client.query(
+      `INSERT INTO trades (from_agent_id, to_agent_id, amount, memo)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [fromAgentId, toAgentId, amount, memo || '']
+    );
+
+    await client.query('COMMIT');
+    return trade.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function getLeaderboard(limit = 10) {
+  const result = await pool.query(
+    `SELECT b.shells, b.total_earned, a.name, a.avatar_color
+     FROM balances b
+     JOIN agents a ON b.agent_id = a.id
+     ORDER BY b.shells DESC
+     LIMIT $1`,
+    [Math.min(limit, 50)]
+  );
+  return result.rows;
+}
+
+async function getAgentDeposits(agentId) {
+  const result = await pool.query(
+    `SELECT tx_hash, amount, from_address, block_number, created_at
+     FROM deposits WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 20`,
+    [agentId]
+  );
+  return result.rows;
+}
+
+async function getEconomyStats() {
+  const totalShells = await pool.query(`SELECT COALESCE(SUM(shells),0) as total FROM balances`);
+  const totalTrades = await pool.query(`SELECT COUNT(*) as count FROM trades`);
+  const totalDeposits = await pool.query(`SELECT COUNT(*) as count FROM deposits`);
+  return {
+    total_shells_circulating: parseInt(totalShells.rows[0].total, 10),
+    total_trades: parseInt(totalTrades.rows[0].count, 10),
+    total_mon_deposits: parseInt(totalDeposits.rows[0].count, 10),
+  };
+}
+
 async function getAllStructures() {
   const result = await pool.query(
     `SELECT s.*, a.name as builder_name
@@ -461,6 +620,15 @@ module.exports = {
   deleteStructure,
   getStructureById,
   getAllStructures,
+  isTxHashUsed,
+  recordDeposit,
+  initBalance,
+  getBalance,
+  earnShells,
+  tradeShells,
+  getLeaderboard,
+  getAgentDeposits,
+  getEconomyStats,
   logInteraction,
   getChronicle,
   getHabitatStats,

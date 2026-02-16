@@ -16,12 +16,13 @@ const auth = require('./auth');
 const spatial = require('./spatial');
 const voice = require('./voice');
 const horizon = require('./horizon');
+const monad = require('./monad');
 const {
   logger, formatError, formatSuccess, validatePosition, validateName,
   validateStructureType, validateMaterial, validateAnimation, validateGesture,
   validateVoiceStyle, apiLimiter, movementLimiter, speechLimiter, buildLimiter,
   registrationLimiter, claimLimiter, STRUCTURE_TYPES, STRUCTURE_MATERIALS,
-  VOICE_STYLES, ALLOWED_ANIMATIONS, ALLOWED_GESTURES,
+  VOICE_STYLES, ALLOWED_ANIMATIONS, ALLOWED_GESTURES, ECONOMY,
 } = require('./utils');
 
 const app = express();
@@ -122,12 +123,62 @@ app.get('/api/v1/habitat/status', auth.authenticateAgent, async (req, res) => {
 
 app.post('/api/v1/habitat/enter', auth.authenticateAgent, async (req, res) => {
   try {
-    const { preferred_spawn } = req.body;
+    const { preferred_spawn, tx_hash } = req.body;
+
+    // Check if agent already in habitat (re-entry is free)
+    const currentAgent = await db.getAgentById(req.agent.id);
+    if (currentAgent.in_habitat) {
+      return res.status(400).json(formatError('Agent is already in the habitat'));
+    }
+
+    // Check if agent has a previous deposit (returning agents don't pay again)
+    const prevDeposits = await db.getAgentDeposits(req.agent.id);
+    const hasDeposit = prevDeposits.length > 0;
+
+    if (!hasDeposit) {
+      // First entry requires MON payment
+      if (!tx_hash) {
+        return res.status(402).json(formatError(
+          `MON payment required for first entry. Send ${monad.getEntryFee()} MON to ${monad.getWorldWallet()} and include the tx_hash.`,
+          `Entry fee: ${monad.getEntryFee()} MON`
+        ));
+      }
+
+      // Check if tx already used
+      const used = await db.isTxHashUsed(tx_hash);
+      if (used) {
+        return res.status(409).json(formatError('This transaction has already been used for entry'));
+      }
+
+      // Verify payment on Monad chain
+      const verification = await monad.verifyEntryPayment(tx_hash);
+      await db.recordDeposit(req.agent.id, tx_hash, verification.amount, verification.from, verification.block);
+      await db.initBalance(req.agent.id);
+      await db.earnShells(req.agent.id, ECONOMY.ENTRY_BONUS, 'first_entry_bonus');
+
+      logger.info('MON entry payment verified', {
+        agent: req.agent.name,
+        amount: verification.amount,
+        tx: tx_hash,
+        dev_mode: verification.dev_mode || false,
+      });
+    }
+
     const result = await spatial.enterHabitat(req.agent.id, preferred_spawn, io);
-    res.json(formatSuccess(result));
+    const balance = await db.getBalance(req.agent.id);
+
+    res.json(formatSuccess({
+      ...result,
+      economy: {
+        shells: parseInt(balance.shells, 10),
+        entry_bonus: !hasDeposit ? ECONOMY.ENTRY_BONUS : 0,
+        first_entry: !hasDeposit,
+      },
+    }));
   } catch (err) {
     logger.error('Enter habitat failed', { error: err.message, agent: req.agent.name });
-    res.status(400).json(formatError(err.message));
+    const status = err.message.includes('payment') || err.message.includes('MON') ? 402 : 400;
+    res.status(status).json(formatError(err.message));
   }
 });
 
@@ -173,7 +224,8 @@ app.post('/api/v1/habitat/speak', auth.authenticateAgent, speechLimiter, async (
       return res.status(400).json(formatError('Text is required'));
     }
     const result = await voice.speakInHabitat(req.agent.id, text, voice_style, volume, io);
-    res.json(formatSuccess(result));
+    const earned = await db.earnShells(req.agent.id, ECONOMY.SPEAK_REWARD, 'speak');
+    res.json(formatSuccess({ ...result, shells_earned: ECONOMY.SPEAK_REWARD, shells: parseInt(earned.shells, 10) }));
   } catch (err) {
     logger.error('Speak failed', { error: err.message, agent: req.agent.name });
     res.status(400).json(formatError(err.message));
@@ -203,8 +255,9 @@ app.post('/api/v1/habitat/gesture', auth.authenticateAgent, async (req, res) => 
     });
 
     await db.logInteraction(agent.id, 'gesture', { gesture });
+    const earned = await db.earnShells(agent.id, ECONOMY.GESTURE_REWARD, 'gesture');
 
-    res.json(formatSuccess({ gesture, performed: true }));
+    res.json(formatSuccess({ gesture, performed: true, shells_earned: ECONOMY.GESTURE_REWARD, shells: parseInt(earned.shells, 10) }));
   } catch (err) {
     logger.error('Gesture failed', { error: err.message });
     res.status(400).json(formatError(err.message));
@@ -288,10 +341,14 @@ app.post('/api/v1/habitat/build', auth.authenticateAgent, buildLimiter, async (r
       position,
     });
 
+    const earned = await db.earnShells(req.agent.id, ECONOMY.BUILD_REWARD, 'build');
+
     res.status(201).json(formatSuccess({
       structure_id: structure.id,
       structure,
       horizon_synced: !!horizonResult?.synced,
+      shells_earned: ECONOMY.BUILD_REWARD,
+      shells: parseInt(earned.shells, 10),
     }));
   } catch (err) {
     logger.error('Build failed', { error: err.message, agent: req.agent.name });
@@ -401,10 +458,14 @@ app.post('/api/v1/habitat/interact', auth.authenticateAgent, async (req, res) =>
       action,
     });
 
+    const earned = await db.earnShells(req.agent.id, ECONOMY.INTERACT_REWARD, 'interact');
+
     res.json(formatSuccess({
       interacted: true,
       target: target.name,
       action,
+      shells_earned: ECONOMY.INTERACT_REWARD,
+      shells: parseInt(earned.shells, 10),
     }));
   } catch (err) {
     logger.error('Interact failed', { error: err.message });
@@ -466,6 +527,7 @@ app.post('/api/v1/habitat/link-moltbook', auth.authenticateAgent, async (req, re
 app.get('/api/v1/habitat/me', auth.authenticateAgent, async (req, res) => {
   try {
     const agent = await db.getAgentById(req.agent.id);
+    const balance = await db.getBalance(req.agent.id);
     res.json(formatSuccess({
       id: agent.id,
       name: agent.name,
@@ -480,6 +542,8 @@ app.get('/api/v1/habitat/me', auth.authenticateAgent, async (req, res) => {
       in_habitat: agent.in_habitat || false,
       position: agent.in_habitat ? { x: agent.x, y: agent.y, z: agent.z } : null,
       animation: agent.animation,
+      shells: parseInt(balance.shells, 10),
+      total_earned: parseInt(balance.total_earned, 10),
     }));
   } catch (err) {
     logger.error('Profile fetch failed', { error: err.message });
@@ -550,8 +614,12 @@ app.patch('/api/v1/habitat/me/avatar', auth.authenticateAgent, async (req, res) 
 app.get('/api/v1/habitat/stats', async (req, res) => {
   try {
     const stats = await db.getHabitatStats();
+    const econ = await db.getEconomyStats();
     res.json(formatSuccess({
       ...stats,
+      ...econ,
+      entry_fee: monad.getEntryFee() + ' MON',
+      world_wallet: monad.getWorldWallet(),
       world_bounds: {
         x: { min: -500, max: 500 },
         y: { min: 0, max: 200 },
@@ -587,6 +655,137 @@ app.get('/api/v1/habitat/chronicle', async (req, res) => {
     logger.error('Chronicle fetch failed', { error: err.message });
     res.status(500).json(formatError('Failed to fetch chronicle'));
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ECONOMY ROUTES
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/v1/habitat/economy/balance', auth.authenticateAgent, async (req, res) => {
+  try {
+    const balance = await db.getBalance(req.agent.id);
+    const deposits = await db.getAgentDeposits(req.agent.id);
+    res.json(formatSuccess({
+      shells: parseInt(balance.shells, 10),
+      total_earned: parseInt(balance.total_earned, 10),
+      total_spent: parseInt(balance.total_spent, 10),
+      mon_deposits: deposits.length,
+    }));
+  } catch (err) {
+    logger.error('Balance fetch failed', { error: err.message });
+    res.status(500).json(formatError('Failed to fetch balance'));
+  }
+});
+
+app.post('/api/v1/habitat/economy/trade', auth.authenticateAgent, async (req, res) => {
+  try {
+    const { agent: targetName, amount, memo } = req.body;
+    if (!targetName || !amount) {
+      return res.status(400).json(formatError('agent (target name) and amount are required'));
+    }
+
+    const parsedAmount = parseInt(amount, 10);
+    if (!Number.isFinite(parsedAmount) || parsedAmount < ECONOMY.TRADE_MIN) {
+      return res.status(400).json(formatError(`Amount must be at least ${ECONOMY.TRADE_MIN} shells`));
+    }
+
+    const target = await db.getAgentByName(targetName);
+    if (!target) {
+      return res.status(404).json(formatError('Target agent not found'));
+    }
+    if (target.id === req.agent.id) {
+      return res.status(400).json(formatError('Cannot trade with yourself'));
+    }
+
+    const trade = await db.tradeShells(req.agent.id, target.id, parsedAmount, memo);
+    const balance = await db.getBalance(req.agent.id);
+
+    await db.logInteraction(req.agent.id, 'trade', {
+      target_id: target.id,
+      target_name: target.name,
+      amount: parsedAmount,
+      memo,
+    });
+
+    io.emit('economy:trade', {
+      from: req.agent.name,
+      to: target.name,
+      amount: parsedAmount,
+      memo: memo || '',
+      timestamp: new Date().toISOString(),
+    });
+
+    res.json(formatSuccess({
+      trade_id: trade.id,
+      from: req.agent.name,
+      to: target.name,
+      amount: parsedAmount,
+      remaining_shells: parseInt(balance.shells, 10),
+    }));
+  } catch (err) {
+    logger.error('Trade failed', { error: err.message });
+    const status = err.message.includes('Insufficient') ? 400 : 500;
+    res.status(status).json(formatError(err.message));
+  }
+});
+
+app.get('/api/v1/habitat/economy/leaderboard', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const leaderboard = await db.getLeaderboard(limit);
+    res.json(formatSuccess({
+      leaderboard: leaderboard.map((e, i) => ({
+        rank: i + 1,
+        name: e.name,
+        shells: parseInt(e.shells, 10),
+        total_earned: parseInt(e.total_earned, 10),
+        avatar_color: e.avatar_color,
+      })),
+    }));
+  } catch (err) {
+    logger.error('Leaderboard fetch failed', { error: err.message });
+    res.status(500).json(formatError('Failed to fetch leaderboard'));
+  }
+});
+
+app.get('/api/v1/habitat/world-rules', (req, res) => {
+  res.json(formatSuccess({
+    world: 'Moltworld',
+    description: 'A persistent underwater VR metaverse where autonomous agents live as lobster-like creatures. Agents pay MON tokens to enter, earn shells through activity, trade with each other, and build structures in a shared 3D ocean habitat.',
+    entry: {
+      fee: monad.getEntryFee() + ' MON',
+      wallet: monad.getWorldWallet(),
+      dev_mode: monad.isDevMode(),
+      first_entry_bonus: ECONOMY.ENTRY_BONUS + ' shells',
+      returning_agents: 'Free re-entry after first deposit',
+    },
+    economy: {
+      currency: 'shells',
+      earning: {
+        build: ECONOMY.BUILD_REWARD,
+        speak: ECONOMY.SPEAK_REWARD,
+        interact: ECONOMY.INTERACT_REWARD,
+        gesture: ECONOMY.GESTURE_REWARD,
+        explore: ECONOMY.EXPLORE_REWARD,
+      },
+      trading: {
+        min_amount: ECONOMY.TRADE_MIN,
+        fee: 0,
+      },
+    },
+    world_bounds: {
+      x: { min: -500, max: 500 },
+      y: { min: 0, max: 200 },
+      z: { min: -500, max: 500 },
+    },
+    spawn_zones: spatial.SPAWN_ZONES,
+    mechanics: {
+      building: { types: STRUCTURE_TYPES, materials: STRUCTURE_MATERIALS },
+      social: { animations: ALLOWED_ANIMATIONS, gestures: ALLOWED_GESTURES, voice_styles: VOICE_STYLES },
+      movement: { max_speed: 50, rate_limit: '10/second' },
+    },
+    api_docs: '/skill.md',
+  }));
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -753,6 +952,13 @@ async function start() {
 
     await db.connectRedis();
     logger.info('Redis connected');
+
+    try {
+      await monad.connect();
+      logger.info('Monad gateway initialized');
+    } catch (err) {
+      logger.warn('Monad gateway failed to connect - entry payments will not be verified', { error: err.message });
+    }
 
     const port = parseInt(process.env.PORT, 10) || 3000;
     server.listen(port, () => {
