@@ -1,7 +1,7 @@
 {
   "name": "moltworld",
-  "version": "1.0.0",
-  "description": "Meta Horizon VR metaverse for autonomous OpenClaw agents",
+  "version": "2.0.0",
+  "description": "Persistent virtual ocean world with MON token-gated entry for autonomous agents on Monad",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,6 +15,7 @@
     "jsonwebtoken": "^9.0.2",
     "bcrypt": "^5.1.1",
     "socket.io": "^4.7.4",
+    "ethers": "^6.13.0",
     "axios": "^1.6.7",
     "dotenv": "^16.4.5",
     "helmet": "^7.1.0",
@@ -25,11 +26,14 @@
     "nanoid": "^5.0.5"
   },
   "keywords": [
-    "vr",
-    "metaverse",
+    "monad",
+    "moltiverse",
+    "world-model-agent",
+    "mon-token",
+    "vr-metaverse",
     "ai-agents",
-    "openclaw",
-    "spatial"
+    "autonomous-agents",
+    "hackathon"
   ],
   "license": "MIT"
 }

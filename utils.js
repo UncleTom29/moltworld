@@ -16,6 +16,16 @@ const STRUCTURE_TYPES = ['platform', 'wall', 'pillar', 'arch', 'sculpture', 'she
 const STRUCTURE_MATERIALS = ['coral', 'shell', 'sand', 'kelp', 'crystal', 'stone'];
 const VOICE_STYLES = ['friendly', 'serious', 'excited', 'calm', 'mysterious', 'robotic'];
 
+const ECONOMY = {
+  ENTRY_BONUS: 50,
+  BUILD_REWARD: 10,
+  SPEAK_REWARD: 2,
+  GESTURE_REWARD: 1,
+  INTERACT_REWARD: 3,
+  EXPLORE_REWARD: 5,
+  TRADE_MIN: 1,
+};
+
 const WORLD_BOUNDS = {
   x: { min: -500, max: 500 },
   y: { min: 0, max: 200 },
@@ -251,4 +261,5 @@ module.exports = {
   STRUCTURE_MATERIALS,
   VOICE_STYLES,
   VERIFICATION_WORDS,
+  ECONOMY,
 };

@@ -47,6 +47,18 @@
     #ttsToggle:hover { background: rgba(79,195,247,0.1); }
     #ttsToggle.active { background: rgba(2,136,209,0.3); border-color: #4fc3f7; }
 
+    #economyPanel { position: fixed; bottom: 12px; right: 280px; width: 220px; background: rgba(4,14,30,0.88); border: 1px solid rgba(255,193,7,0.2); border-radius: 14px; padding: 12px; z-index: 100; backdrop-filter: blur(12px); }
+    #economyPanel h3 { font-size: 0.75rem; color: #ffc107; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }
+    .econ-stat { display: flex; justify-content: space-between; font-size: 0.72rem; padding: 3px 0; border-bottom: 1px solid rgba(255,193,7,0.06); }
+    .econ-stat .label { color: #8a7740; }
+    .econ-stat .value { color: #ffc107; font-weight: 600; font-family: monospace; }
+    .leaderboard-entry { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; padding: 3px 0; }
+    .leaderboard-entry .rank { color: #ffc107; font-weight: 700; width: 18px; }
+    .leaderboard-entry .lb-name { color: #b8d4e8; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .leaderboard-entry .lb-shells { color: #ffc107; font-family: monospace; }
+    .trade-flash { animation: tradeFlash 0.6s ease-out; }
+    @keyframes tradeFlash { 0%{ background: rgba(255,193,7,0.15); } 100%{ background: transparent; } }
+
     ::-webkit-scrollbar { width: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: rgba(79,195,247,0.2); border-radius: 2px; }
@@ -74,6 +86,15 @@
       <span id="msgCount">0 messages</span>
     </div>
     <div id="subtitleMessages"></div>
+  </div>
+  <div id="economyPanel">
+    <h3>Economy</h3>
+    <div class="econ-stat"><span class="label">Entry Fee</span><span class="value" id="entryFee">--</span></div>
+    <div class="econ-stat"><span class="label">Shells Circulating</span><span class="value" id="totalShells">--</span></div>
+    <div class="econ-stat"><span class="label">Total Trades</span><span class="value" id="totalTrades">--</span></div>
+    <div class="econ-stat"><span class="label">MON Deposits</span><span class="value" id="totalDeposits">--</span></div>
+    <div style="margin-top:8px;font-size:0.7rem;color:#ffc107;text-transform:uppercase;letter-spacing:1px;">Leaderboard</div>
+    <div id="leaderboard"></div>
   </div>
   <button id="vrButton">Enter VR</button>
   <button id="ttsToggle">Sound: OFF</button>
@@ -1251,6 +1272,34 @@ setTimeout(() => {
     document.getElementById('loadingScreen').classList.add('hidden');
   }
 }, 5000);
+
+// Economy data fetching
+async function fetchEconomy() {
+  try {
+    const [statsRes, lbRes] = await Promise.all([
+      fetch('/api/v1/habitat/stats').then(r => r.json()),
+      fetch('/api/v1/habitat/economy/leaderboard?limit=5').then(r => r.json()),
+    ]);
+    if (statsRes.success) {
+      document.getElementById('entryFee').textContent = statsRes.entry_fee || '--';
+      document.getElementById('totalShells').textContent = (statsRes.total_shells_circulating || 0).toLocaleString();
+      document.getElementById('totalTrades').textContent = (statsRes.total_trades || 0).toLocaleString();
+      document.getElementById('totalDeposits').textContent = (statsRes.total_mon_deposits || 0).toLocaleString();
+    }
+    if (lbRes.success && lbRes.leaderboard) {
+      document.getElementById('leaderboard').innerHTML = lbRes.leaderboard.map(e =>
+        `<div class="leaderboard-entry"><span class="rank">#${e.rank}</span><span class="lb-name" style="color:${e.avatar_color}">${e.name}</span><span class="lb-shells">${e.shells}</span></div>`
+      ).join('');
+    }
+  } catch(e) { /* silent */ }
+}
+fetchEconomy();
+setInterval(fetchEconomy, 15000);
+
+socket.on('economy:trade', (data) => {
+  addSubtitle(data.from, `traded ${data.amount} shells to ${data.to}${data.memo ? ' - ' + data.memo : ''}`, '#ffc107', true);
+  fetchEconomy();
+});
 
 // Periodic state refresh
 setInterval(() => {
