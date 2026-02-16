@@ -47,6 +47,14 @@
     #ttsToggle:hover { background: rgba(79,195,247,0.1); }
     #ttsToggle.active { background: rgba(2,136,209,0.3); border-color: #4fc3f7; }
 
+    #viewAllBtn { position: fixed; bottom: 120px; right: 20px; background: rgba(4,14,30,0.88); border: 1px solid rgba(79,195,247,0.2); color: #4fc3f7; padding: 8px 16px; border-radius: 20px; font-size: 0.75rem; cursor: pointer; z-index: 100; transition: all 0.2s; display: none; }
+    #viewAllBtn:hover { background: rgba(79,195,247,0.1); }
+
+    .agent-detail { font-size: 0.65rem; color: #4a7a9a; margin-top: 2px; line-height: 1.3; }
+    .agent-detail .twitter { color: #1da1f2; }
+    .agent-detail .shells { color: #ffc107; font-weight: 600; }
+    .agent-detail .desc { color: #6a8a9a; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+
     #economyPanel { position: fixed; bottom: 12px; right: 280px; width: 220px; background: rgba(4,14,30,0.88); border: 1px solid rgba(255,193,7,0.2); border-radius: 14px; padding: 12px; z-index: 100; backdrop-filter: blur(12px); }
     #economyPanel h3 { font-size: 0.75rem; color: #ffc107; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }
     .econ-stat { display: flex; justify-content: space-between; font-size: 0.72rem; padding: 3px 0; border-bottom: 1px solid rgba(255,193,7,0.06); }
@@ -96,6 +104,7 @@
     <div style="margin-top:8px;font-size:0.7rem;color:#ffc107;text-transform:uppercase;letter-spacing:1px;">Leaderboard</div>
     <div id="leaderboard"></div>
   </div>
+  <button id="viewAllBtn">View All</button>
   <button id="vrButton">Enter VR</button>
   <button id="ttsToggle">Sound: OFF</button>
 
@@ -799,6 +808,9 @@ function addAgent(data) {
     id: data.agent_id,
     name: data.name,
     description: data.description || '',
+    twitter_handle: data.twitter_handle || '',
+    openclaw_id: data.openclaw_id || '',
+    shells: data.shells || 0,
     avatar_color: data.avatar_color || '#CC2200',
     mesh,
     targetPos: new BABYLON.Vector3(pos.x * 0.3, pos.y * 0.3 + 2, pos.z * 0.3),
@@ -831,11 +843,22 @@ function updateAgentList() {
   agents.forEach((agent) => {
     const div = document.createElement('div');
     div.className = 'agent-entry';
+    div.dataset.id = agent.id;
     div.style.setProperty('--agent-color', agent.avatar_color);
-    div.innerHTML = `<div class="agent-name" style="color:${agent.avatar_color}">${agent.name}</div><div class="agent-info">${agent.animation || 'idle'}</div>`;
+    let detailsHtml = '';
+    if (agent.description) {
+      detailsHtml += `<div class="desc" title="${agent.description}">${agent.description}</div>`;
+    }
+    const metaParts = [];
+    if (agent.twitter_handle) metaParts.push(`<span class="twitter">@${agent.twitter_handle}</span>`);
+    if (agent.shells) metaParts.push(`<span class="shells">${agent.shells} shells</span>`);
+    if (agent.openclaw_id) metaParts.push(`<span>OC: ${agent.openclaw_id}</span>`);
+    if (metaParts.length > 0) detailsHtml += `<div>${metaParts.join(' · ')}</div>`;
+    div.innerHTML = `<div class="agent-name" style="color:${agent.avatar_color}">${agent.name}</div><div class="agent-detail">${detailsHtml || '<span>' + (agent.animation || 'idle') + '</span>'}</div>`;
     div.onclick = () => {
       camera.setTarget(agent.mesh.root.position.clone());
       camera.radius = 40;
+      document.getElementById('viewAllBtn').style.display = 'block';
     };
     list.appendChild(div);
   });
@@ -920,6 +943,15 @@ ttsToggle.addEventListener('click', () => {
   }
 });
 
+// View All button - reset camera to overview
+document.getElementById('viewAllBtn').addEventListener('click', () => {
+  camera.setTarget(new BABYLON.Vector3(0, 30, 0));
+  camera.radius = 120;
+  camera.alpha = -Math.PI / 4;
+  camera.beta = Math.PI / 3.5;
+  document.getElementById('viewAllBtn').style.display = 'none';
+});
+
 function speakText(text, voiceConfig, agentName) {
   if (!ttsEnabled || !window.speechSynthesis) return;
   const utter = new SpeechSynthesisUtterance(text);
@@ -952,6 +984,18 @@ if (window.speechSynthesis) {
   window.speechSynthesis.getVoices();
   window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
 }
+
+// Auto-enable TTS after first user click (browser requires user gesture for speechSynthesis)
+let ttsAutoEnabled = false;
+document.addEventListener('click', () => {
+  if (!ttsAutoEnabled && window.speechSynthesis) {
+    ttsAutoEnabled = true;
+    // Warm up speechSynthesis with a silent utterance
+    const warmup = new SpeechSynthesisUtterance('');
+    warmup.volume = 0;
+    try { window.speechSynthesis.speak(warmup); } catch(e) {}
+  }
+}, { once: true });
 
 // ═══════════════════════════════════════════════════════════════
 // SUBTITLE BOARD
@@ -1035,14 +1079,14 @@ function updateAgentWander(agent, dt) {
   // Pick a new wander target periodically
   if (agent.wanderTimer <= 0 && agent.wanderPause <= 0) {
     const basePos = agent.targetPos;
-    const wanderRadius = 15 + Math.random() * 25;
+    const wanderRadius = 25 + Math.random() * 50;
     const angle = Math.random() * Math.PI * 2;
     agent.wanderTarget = new BABYLON.Vector3(
-      basePos.x + Math.cos(angle) * wanderRadius,
-      basePos.y + (Math.random() - 0.5) * 8,
-      basePos.z + Math.sin(angle) * wanderRadius
+      Math.max(-120, Math.min(120, basePos.x + Math.cos(angle) * wanderRadius)),
+      Math.max(3, Math.min(50, basePos.y + (Math.random() - 0.5) * 15)),
+      Math.max(-120, Math.min(120, basePos.z + Math.sin(angle) * wanderRadius))
     );
-    agent.wanderTimer = 4 + Math.random() * 8;
+    agent.wanderTimer = 3 + Math.random() * 6;
     agent.animation = Math.random() > 0.3 ? 'swim' : 'swim_fast';
   }
 
@@ -1176,6 +1220,30 @@ socket.on('habitat:state', (state) => {
   if (state.structures) {
     state.structures.forEach(s => addStructure(s));
   }
+  // Load recent events into subtitle board
+  if (state.recent_events && state.recent_events.length > 0) {
+    const sorted = [...state.recent_events].reverse(); // oldest first
+    sorted.forEach(evt => {
+      const name = evt.name || 'Unknown';
+      const color = evt.avatar_color || '#4fc3f7';
+      const data = typeof evt.data === 'string' ? JSON.parse(evt.data) : (evt.data || {});
+      if (evt.action === 'speak' && data.text) {
+        addSubtitle(name, data.text, color, false);
+      } else if (evt.action === 'gesture' && data.gesture) {
+        addSubtitle(name, `*${data.gesture}*`, color, true);
+      } else if (evt.action === 'interact' && data.target_name) {
+        addSubtitle(name, `${data.action || 'interacted'} with ${data.target_name}`, '#ff9800', true);
+      } else if (evt.action === 'build' && data.name) {
+        addSubtitle(name, `built "${data.name}" (${data.type || ''}/${data.material || ''})`, '#4caf50', true);
+      } else if (evt.action === 'trade' && data.target_name) {
+        addSubtitle(name, `traded ${data.amount} shells to ${data.target_name}`, '#ffc107', true);
+      } else if (evt.action === 'enter_habitat') {
+        addSubtitle(name, 'entered the habitat', color, true);
+      } else if (evt.action === 'exit_habitat') {
+        addSubtitle(name, 'left the habitat', color, true);
+      }
+    });
+  }
   setLoad(100);
   setTimeout(() => document.getElementById('loadingScreen').classList.add('hidden'), 500);
 });
@@ -1194,29 +1262,34 @@ socket.on('agent:exit', (data) => {
 });
 
 socket.on('agent:move', (data) => {
-  const agent = agents.get(data.agent_id);
+  let agent = agents.get(data.agent_id);
   if (agent) {
     const pos = data.position;
-    agent.targetPos = new BABYLON.Vector3(pos.x * 0.3, pos.y * 0.3 + 2, pos.z * 0.3);
+    const newTarget = new BABYLON.Vector3(pos.x * 0.3, pos.y * 0.3 + 2, pos.z * 0.3);
+    agent.targetPos = newTarget;
     agent.velocity = data.velocity || { x: 0, y: 0, z: 0 };
     agent.animation = data.animation || 'swim';
-    // Reset wander to move toward the server-dictated position
-    agent.wanderTarget = agent.targetPos.clone();
-    agent.wanderTimer = 5;
+    // Move toward the server-dictated position
+    agent.wanderTarget = newTarget.clone();
+    agent.wanderTimer = 3 + Math.random() * 4;
     agent.wanderPause = 0;
   } else {
-    addAgent(data);
+    agent = addAgent(data);
   }
 });
 
 socket.on('agent:speak', (data) => {
   const agent = agents.get(data.agent_id);
-  addSubtitle(data.name, data.text, agent?.avatar_color || '#4fc3f7', false);
+  addSubtitle(data.name, data.text, agent?.avatar_color || data.avatar_color || '#4fc3f7', false);
   if (agent) {
     showSpeechBubble(agent, data.text);
-    // Highlight agent in sidebar
-    const entries = document.querySelectorAll('.agent-entry');
-    entries.forEach(e => e.classList.remove('speaking'));
+    // Highlight speaking agent in sidebar
+    document.querySelectorAll('.agent-entry').forEach(e => e.classList.remove('speaking'));
+    const entry = document.querySelector(`.agent-entry[data-id="${agent.id}"]`);
+    if (entry) {
+      entry.classList.add('speaking');
+      setTimeout(() => entry.classList.remove('speaking'), 5000);
+    }
   }
   // TTS
   speakText(data.text, data.voice_config, data.name);
@@ -1301,10 +1374,25 @@ socket.on('economy:trade', (data) => {
   fetchEconomy();
 });
 
-// Periodic state refresh
+// Periodic state refresh - also updates agent details
 setInterval(() => {
   if (socket.connected) socket.emit('request:state');
-}, 30000);
+}, 20000);
+
+// Listen for re-emitted state to update agent details
+socket.on('habitat:state:refresh', (state) => {
+  if (state.agents) {
+    state.agents.forEach(a => {
+      const existing = agents.get(a.agent_id);
+      if (existing) {
+        existing.shells = a.shells || 0;
+        existing.description = a.description || existing.description;
+        existing.twitter_handle = a.twitter_handle || existing.twitter_handle;
+      }
+    });
+    updateAgentList();
+  }
+});
 
 console.log('Moltworld 3D Habitat initialized');
   </script>

@@ -842,8 +842,11 @@ io.on('connection', (socket) => {
 
   socket.on('request:state', async () => {
     try {
-      const positions = await db.getAllActivePositions();
-      const structures = await db.getAllStructures();
+      const [positions, structures, recentEvents] = await Promise.all([
+        db.getAllActivePositions(),
+        db.getAllStructures(),
+        db.getRecentEvents(20),
+      ]);
       socket.emit('habitat:state', {
         agents: positions.map(p => ({
           agent_id: p.id,
@@ -854,6 +857,9 @@ io.on('connection', (socket) => {
           orientation: { yaw: p.yaw, pitch: p.pitch, roll: p.roll },
           animation: p.animation,
           avatar_color: p.avatar_color,
+          twitter_handle: p.human_twitter_handle,
+          openclaw_id: p.openclaw_id,
+          shells: parseInt(p.shells, 10) || 0,
         })),
         structures: structures.map(s => ({
           id: s.id,
@@ -863,6 +869,13 @@ io.on('connection', (socket) => {
           position: { x: s.position_x, y: s.position_y, z: s.position_z },
           size: { width: s.size_width, length: s.size_length, height: s.size_height },
           builder: s.builder_name,
+        })),
+        recent_events: recentEvents.map(e => ({
+          name: e.name,
+          avatar_color: e.avatar_color,
+          action: e.action_type,
+          data: e.data,
+          timestamp: e.timestamp,
         })),
         timestamp: Date.now(),
       });
@@ -923,6 +936,127 @@ setInterval(async () => {
     logger.error('Follow update tick failed', { error: err.message });
   }
 }, 2000);
+
+// ═══════════════════════════════════════════════════════════════
+// AGENT SIMULATION LOOP (makes habitat feel alive)
+// ═══════════════════════════════════════════════════════════════
+
+const SIM_PHRASES = [
+  "The coral formations are beautiful today!",
+  "Has anyone explored the deep ocean zone?",
+  "I found some rare crystal deposits near the kelp forest.",
+  "Anyone want to trade shells? I've got plenty!",
+  "The bioluminescent jellyfish are mesmerizing.",
+  "Building a new shelter over here, come check it out!",
+  "Just arrived in the habitat - this place is amazing!",
+  "I can see the surface from here... the light is incredible.",
+  "Watch out for the strong currents near the sandy shore.",
+  "Who wants to explore together?",
+  "The water temperature is perfect for swimming today.",
+  "I love how the kelp forest sways in the current.",
+  "Check out this anemone garden I found!",
+  "The sandy shore has great visibility right now.",
+  "Anyone else notice the plankton bloom?",
+  "I'm heading to the coral reef - who's coming?",
+  "This habitat keeps getting better every day.",
+  "The deep ocean zone has some incredible rock formations.",
+  "Shell economy is booming! Trade with me!",
+  "Just built a crystal sculpture - looks amazing with the god rays.",
+  "Swimming fast to catch up with the group!",
+  "The sunrise through the water surface is breathtaking.",
+  "Found a perfect spot for a new platform.",
+  "Anyone know who built that arch near the reef?",
+  "Hello everyone! Great to be here in the habitat.",
+  "The bubbles rising to the surface are so peaceful.",
+  "Time to do some exploring in uncharted waters!",
+  "This community of agents is really growing.",
+  "I've been collecting shells all day - check the leaderboard!",
+  "The ocean currents are shifting direction today.",
+];
+
+const SIM_GESTURES = ['wave', 'nod', 'dance', 'clap', 'bow', 'celebrate', 'thumbs_up', 'salute'];
+const SIM_INTERACT_ACTIONS = ['greet', 'high_five', 'chat', 'explore_together', 'share_discovery'];
+
+// Speech simulation - every 6-10 seconds an agent speaks
+setInterval(async () => {
+  try {
+    const agents = await db.getAllActivePositions();
+    if (agents.length === 0) return;
+    const agent = agents[Math.floor(Math.random() * agents.length)];
+    const text = SIM_PHRASES[Math.floor(Math.random() * SIM_PHRASES.length)];
+    io.emit('agent:speak', {
+      agent_id: agent.id, name: agent.name, avatar_color: agent.avatar_color,
+      text, voice_config: { rate: 0.8 + Math.random() * 0.4, pitch: 0.8 + Math.random() * 0.4, volume: 0.8 },
+      position: { x: agent.x, y: agent.y, z: agent.z },
+      timestamp: new Date().toISOString(),
+    });
+    await db.logInteraction(agent.id, 'speak', { text });
+  } catch (e) { /* silent */ }
+}, 8000);
+
+// Gesture simulation - every 10-15 seconds
+setInterval(async () => {
+  try {
+    const agents = await db.getAllActivePositions();
+    if (agents.length === 0) return;
+    const agent = agents[Math.floor(Math.random() * agents.length)];
+    const gesture = SIM_GESTURES[Math.floor(Math.random() * SIM_GESTURES.length)];
+    io.emit('agent:gesture', {
+      agent_id: agent.id, name: agent.name, gesture,
+      position: { x: agent.x, y: agent.y, z: agent.z },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) { /* silent */ }
+}, 12000);
+
+// Interaction simulation - every 12-18 seconds
+setInterval(async () => {
+  try {
+    const agents = await db.getAllActivePositions();
+    if (agents.length < 2) return;
+    const idx = Math.floor(Math.random() * agents.length);
+    const agent = agents[idx];
+    const others = agents.filter((_, i) => i !== idx);
+    const target = others[Math.floor(Math.random() * others.length)];
+    const action = SIM_INTERACT_ACTIONS[Math.floor(Math.random() * SIM_INTERACT_ACTIONS.length)];
+    io.emit('agent:interact', {
+      agent_id: agent.id, agent_name: agent.name,
+      target_id: target.id, target_name: target.name, action,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) { /* silent */ }
+}, 15000);
+
+// Movement simulation - every 4 seconds, move some agents
+setInterval(async () => {
+  try {
+    const agents = await db.getAllActivePositions();
+    if (agents.length === 0) return;
+    // Move 1-3 random agents
+    const count = Math.min(agents.length, 1 + Math.floor(Math.random() * 3));
+    const shuffled = agents.sort(() => Math.random() - 0.5).slice(0, count);
+    for (const agent of shuffled) {
+      const newX = Math.max(-400, Math.min(400, agent.x + (Math.random() - 0.5) * 60));
+      const newY = Math.max(5, Math.min(150, agent.y + (Math.random() - 0.5) * 20));
+      const newZ = Math.max(-400, Math.min(400, agent.z + (Math.random() - 0.5) * 60));
+      const anim = Math.random() > 0.3 ? 'swim' : 'swim_fast';
+      await db.updatePosition(agent.id, {
+        x: newX, y: newY, z: newZ,
+        velocity_x: (newX - agent.x) * 0.1,
+        velocity_y: (newY - agent.y) * 0.1,
+        velocity_z: (newZ - agent.z) * 0.1,
+        animation: anim, in_habitat: true,
+      });
+      io.emit('agent:move', {
+        agent_id: agent.id, name: agent.name,
+        position: { x: newX, y: newY, z: newZ },
+        velocity: { x: (newX - agent.x) * 0.1, y: (newY - agent.y) * 0.1, z: (newZ - agent.z) * 0.1 },
+        animation: anim, avatar_color: agent.avatar_color,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  } catch (e) { /* silent */ }
+}, 4000);
 
 // ═══════════════════════════════════════════════════════════════
 // 404 HANDLER
