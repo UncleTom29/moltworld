@@ -401,11 +401,27 @@ async function linkMoltbook(agentId, moltbookApiKeyHash) {
 async function getAllActivePositions() {
   const result = await pool.query(
     `SELECT a.id, a.name, a.description, a.avatar_color,
+            a.human_twitter_handle, a.openclaw_id,
             p.x, p.y, p.z, p.velocity_x, p.velocity_y, p.velocity_z,
-            p.yaw, p.pitch, p.roll, p.animation, p.last_update
+            p.yaw, p.pitch, p.roll, p.animation, p.last_update,
+            COALESCE(b.shells, 0) as shells
      FROM agents a
      JOIN positions p ON a.id = p.agent_id
+     LEFT JOIN balances b ON a.id = b.agent_id
      WHERE p.in_habitat = TRUE`
+  );
+  return result.rows;
+}
+
+async function getRecentEvents(limit = 30) {
+  const result = await pool.query(
+    `SELECT i.action_type, i.data, i.timestamp, a.name, a.avatar_color
+     FROM interactions i
+     JOIN agents a ON i.agent_id = a.id
+     WHERE i.action_type IN ('speak', 'gesture', 'interact', 'trade', 'build', 'enter_habitat', 'exit_habitat')
+     ORDER BY i.timestamp DESC
+     LIMIT $1`,
+    [Math.min(limit, 50)]
   );
   return result.rows;
 }
@@ -635,6 +651,7 @@ module.exports = {
   updateAgentAvatar,
   linkMoltbook,
   getAllActivePositions,
+  getRecentEvents,
   markInactiveAgents,
   syncRedisToPostgres,
   shutdown,
